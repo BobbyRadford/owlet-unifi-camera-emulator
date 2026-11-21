@@ -1,0 +1,12 @@
+.env
+config/
+libs/
+patches/tutk_client.orig.py
+patches/tutk_client.py
+protect-cam/data/
+protect-cam/models/*.onnx
+run/
+tools/.unifi-session-*
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,86 @@
+# Owlet Cam -> UniFi Protect (emulated native UVC G6 Instant camera).
+#
+#   owlet-bridge   logs into Owlet for the camera's keys, pulls H.264 and Opus
+#                  over ThroughTek P2P, and serves rtsp://127.0.0.1:8554/owlet.
+#                  Its control panel on 127.0.0.1:8088 has no login, so it is
+#                  bound to localhost only.
+#   owlet-go2rtc   go2rtc 1.9.15 re-serving that stream with 16 kHz mono AAC
+#                  audio on rtsp://127.0.0.1:8564/owlet (see go2rtc.yaml).
+#   owlet-protect  protect-cam/: presents the stream to UniFi Protect as a
+#                  native UVC G6 Instant with local motion, person/vehicle/animal
+#                  and audio detections (including baby crying) plus talk-back.
+name: owlet-unifi-camera-emulator
+
+services:
+  owlet-bridge:
+    image: ghcr.io/btoth525/owlet-bridge-native@sha256:e127dbaa12fa65b98bc81b8b162cb1719691251d29aacaafd2764c22994553ee
+    container_name: owlet-bridge
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+      # libIOTCAPIs/libAVAPIs/libTUTKGlobalAPIs extracted from the Owlet Care APK
+      - ./libs:/app/libs:ro
+      # Patched tutk_client.py built by ./scripts/patch-bridge.sh
+      - ./patches/tutk_client.py:/app/tutk_client.py:ro
+      # Shared TMPDIR so owlet-protect can write talk-back audio to the bridge FIFO
+      - ./run/bridge-tmp:/data/data/com.termux/files/usr/tmp
+    ports:
+      - "127.0.0.1:8088:8088"   # control panel (localhost only)
+      - "127.0.0.1:1984:1984"   # bridge's go2rtc UI
+      - "127.0.0.1:8554:8554"   # RTSP source read by owlet-go2rtc
+
+  owlet-go2rtc:
+    image: alexxit/go2rtc:1.9.15
+    container_name: owlet-go2rtc
+    restart: unless-stopped
+    # Host networking so it reaches the bridge and owlet-protect on 127.0.0.1.
+    network_mode: host
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    depends_on:
+      - owlet-bridge
+
+  owlet-protect:
+    build: ./protect-cam
+    image: owlet-unifi-camera-emulator
+    container_name: owlet-protect
+    restart: unless-stopped
+    # Host networking: Protect sends talk-back audio to UDP 7004 on this host,
+    # and the stream is read from go2rtc on 127.0.0.1:8564.
+    network_mode: host
+    volumes:
+      - ./protect-cam/data:/data          # client.pem, messages.jsonl
+      - ./run/bridge-tmp:/talk            # bridge speaker FIFO
+    command:
+      - --host=${PROTECT_NVR_IP:?set PROTECT_NVR_IP in .env}
+      - --cert=/data/client.pem
+      - --token=${OWLET_ADOPTION_TOKEN:-adopted}
+      - --mac=${CAMERA_MAC:?set CAMERA_MAC in .env}
+      - --ip=${CAMERA_HOST_IP:?set CAMERA_HOST_IP in .env}
+      - --name=${CAMERA_NAME:-Nursery}
+      - --model=UVC G6 Instant
+      - --sysid=0xa603
+      - --platform=sav539g
+      - --fw-version=5.5.51
+      - --fw-build=68d06d8.261110.646
+      - owlet
+      - --source=rtsp://127.0.0.1:8564/owlet
+      # extract_extradata: the bridge's SDP carries the initial 864x480 SPS while
+      # the stream is 1080p, so regenerate the FLV header from each keyframe's SPS/PPS.
+      # setts: space the P-frame following each keyframe 2 ms away so no two frames
+      # share a millisecond timestamp.
+      - --ffmpeg-args=-c:v copy -bsf:v "extract_extradata,setts=ts=if(lt(DTS-PREV_OUTDTS\,0.002/TB)\,PREV_OUTDTS+0.002/TB\,DTS)" -c:a copy
+      - --hi-width=1920
+      - --hi-height=1080
+      - --hi-fps=15
+      - --lo-width=1920
+      - --lo-height=1080
+      - --lo-fps=15
+      - --ai-min-confidence=${AI_MIN_CONFIDENCE:-0.5}
+      - --yolo-model=yolo11s.onnx
+      - --yolo-every=${YOLO_EVERY:-3}
+      - --talk-fifo=/talk/owlet-talk-owlet
+      - --debug-port=8590
+      - --message-log=/data/messages.jsonl
+    depends_on:
+      - owlet-go2rtc

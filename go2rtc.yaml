@@ -1,0 +1,22 @@
+# Re-serves the bridge's stream for owlet-protect with the audio converted to AAC,
+# which is what a UniFi camera sends. Every reader in owlet-protect (three video
+# channels, motion/object detection, audio detection) shares this one source.
+
+api:
+  listen: "127.0.0.1:8581"   # HTTP API, /api/streams shows each consumer
+
+rtsp:
+  listen: "127.0.0.1:8564"
+
+webrtc:
+  listen: ""        # off; the bridge already uses 8555
+
+srtp:
+  listen: ""        # off; HomeKit only
+
+streams:
+  owlet:
+    # One ffmpeg copies the video and converts the bridge's Opus to AAC (mono,
+    # 16 kHz). A separate audio-only ffmpeg next to a plain RTSP video source
+    # stalled after two packets.
+    - ffmpeg:rtsp://127.0.0.1:8554/owlet#video=copy#audio=aac/16000

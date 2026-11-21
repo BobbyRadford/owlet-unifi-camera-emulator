@@ -1,0 +1,84 @@
+--- a/tutk_client.py
++++ b/tutk_client.py
+@@ -816,7 +816,7 @@
+                 break
+             # start the server NOW (no ack wait) — it accepts the camera's inbound
+             # connection within AVSERV_TIMEOUT seconds.
+-            sidx = av.avServStart2(session, b"", b"", AVSERV_TIMEOUT, 0, chan)
++            sidx = av.avServStart2(session, _SPEAKER_AUTH, AVSERV_TIMEOUT, 0, chan)
+             log(f"[talk] avServStart2(chan={chan}) -> serv_idx={sidx}")
+             if sidx >= 0:
+                 spk_chan = chan
+@@ -1033,6 +1033,18 @@
+     ]
+ 
+ 
++# Older libIOTCAPIs.so builds (the x86_64 ones in the legacy Owlet Care app)
++# check `cmp [rdx],0x14` instead: the classic 20-byte TUTK layout. Connect
++# tries the 160-byte struct first and falls back to this one on -46.
++class St_IOTCConnectInputLegacy(Structure):
++    _fields_ = [
++        ("structSize", c_int),          # 0x00  must be 20
++        ("authenticationType", c_int),  # 0x04
++        ("authKey", c_char * 8),        # 0x08
++        ("timeout", c_int),             # 0x10
++    ]
++
++
+ # --------------------------------------------------------------------------- #
+ # SessionModeVer — the struct IOTC_Session_Check() fills in. Standard TUTK
+ # IOTCAPIs.h layout: two unsigned ints, no padding.
+@@ -1089,6 +1101,12 @@
+     print(ts, "[tutk]", *a, file=sys.stderr, flush=True)
+ 
+ 
++# avServStart2's auth callback (account, password) -> nonzero to accept. The
++# camera is the only peer on the session, so it accepts any.
++_AUTH_FN = ctypes.CFUNCTYPE(c_int, c_char_p, c_char_p)
++_SPEAKER_AUTH = _AUTH_FN(lambda account, password: 1)
++
++
+ def _set_sig(lib, name, restype, argtypes):
+     """Set restype/argtypes if the symbol exists (prevents 64-bit ptr truncation)."""
+     fn = getattr(lib, name, None)
+@@ -1173,7 +1191,7 @@
+     _set_sig(iotc, "IOTC_Initialize2", c_int, [c_uint])
+     _set_sig(iotc, "IOTC_Get_SessionID", c_int, [])
+     _set_sig(iotc, "IOTC_Connect_ByUIDEx", c_int,
+-             [c_char_p, c_int, POINTER(St_IOTCConnectInput)])
++             [c_char_p, c_int, c_void_p])  # either connect-input layout
+     _set_sig(iotc, "IOTC_Connect_ByUID_Parallel", c_int, [c_char_p, c_int])
+     _set_sig(iotc, "IOTC_Session_Close", c_int, [c_int])
+     _set_sig(iotc, "IOTC_Session_Check", c_int, [c_int, c_void_p])
+@@ -1203,8 +1221,12 @@
+     # lack some, in which case talk falls back to the legacy client-channel send).
+     _set_sig(iotc, "IOTC_Session_Get_Free_Channel", c_int, [c_int])
+     _set_sig(iotc, "IOTC_Session_Channel_OFF", c_int, [c_int, c_int])
++    # The legacy Owlet Care libraries' avServStart2 is (SID, authFn, timeout,
++    # servType, channel), not (SID, account, password, ...): with six arguments
++    # the channel landed in servType and the server asked for channel 0, the
++    # video channel, which failed with -20027 (AV_ER_IOTC_CHANNEL_IN_USED).
+     _set_sig(av, "avServStart2", c_int,
+-             [c_int, c_char_p, c_char_p, c_int, c_int, c_int])
++             [c_int, _AUTH_FN, c_uint, c_uint, c_ubyte])
+     _set_sig(av, "avServExit", c_int, [c_int, c_int])
+     _set_sig(av, "avServStop", c_int, [c_int])
+     if tutk is not None:
+@@ -1270,8 +1292,16 @@
+             inp.authenticationType = 0
+             inp.authKey = ak[:8]
+             inp.timeout = CONNECT_TIMEOUT
+-            session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, byref(inp))
++            session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, ctypes.addressof(inp))
+             log(f"IOTC_Connect_ByUIDEx -> {session}")
++            if session == -46:
++                old = St_IOTCConnectInputLegacy()
++                old.structSize = 20
++                old.authenticationType = 0
++                old.authKey = ak[:8]
++                old.timeout = CONNECT_TIMEOUT
++                session = iotc.IOTC_Connect_ByUIDEx(uid.encode(), sid, ctypes.addressof(old))
++                log(f"IOTC_Connect_ByUIDEx (20-byte input) -> {session}")
+             if session < 0 and hasattr(iotc, "IOTC_Connect_ByUID_Parallel"):
+                 # Fallback for cams that don't require the authKey.
+                 session = iotc.IOTC_Connect_ByUID_Parallel(uid.encode(), sid)
